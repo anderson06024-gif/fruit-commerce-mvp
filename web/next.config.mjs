@@ -1,3 +1,11 @@
+import path from 'path'
+
 /** @type {import('next').NextConfig} */
-const nextConfig = { output: 'standalone' };
-export default nextConfig;
+const nextConfig = {
+  webpack: (config) => {
+    config.resolve.alias['@'] = path.resolve('./')
+    return config
+  }
+}
+
+export default nextConfig
