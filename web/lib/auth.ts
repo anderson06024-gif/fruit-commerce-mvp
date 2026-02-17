@@ -1,55 +1,60 @@
 // web/lib/auth.ts
-import type { NextRequest } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import { mustGetEnv } from "./env";
 
-/**
- * MVP auth helper:
- * - Reads actor_id from request headers (x-actor-id) or Bearer token (optional future)
- * - Fetches role from public.users via service_role supabase admin client
- */
+export type AppRole = "customer" | "driver" | "warehouse" | "admin";
 
-export type ActorRole = "customer" | "driver" | "warehouse" | "admin";
-
-export async function getActorId(req: NextRequest): Promise<string | null> {
-  // Minimal / MVP: trust an explicit header set by your app / gateway
-  const actorId = req.headers.get("x-actor-id");
-  if (actorId && actorId.trim().length > 0) return actorId.trim();
-
-  // Future-ready: support Bearer token (not implemented in MVP)
-  // const auth = req.headers.get("authorization") || "";
-  // if (auth.startsWith("Bearer ")) { ... }
-
-  return null;
+export function supabaseAnon() {
+  const url = mustGetEnv("NEXT_PUBLIC_SUPABASE_URL");
+  const anon = mustGetEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY");
+  return createClient(url, anon, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
 }
 
-export async function requireRole(req: NextRequest, allowed: ActorRole[]) {
-  const actorId = await getActorId(req);
-  if (!actorId) {
-    return { ok: false as const, status: 401, message: "unauthorized: missing actor" };
-  }
+export function getBearerToken(req: Request): string | null {
+  const h = req.headers.get("authorization") || req.headers.get("Authorization");
+  if (!h) return null;
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
+}
 
-  // ✅ FIX: only call supabaseAdmin() ONCE. It returns a SupabaseClient.
+export async function requireUserAndRole(token: string) {
+  const sb = supabaseAnon();
+
+  // 驗 JWT → 拿 user
+  const { data, error } = await sb.auth.getUser(token);
+  if (error || !data?.user) throw new Error("UNAUTHORIZED");
+
+  // ✅ FIX：supabaseAdmin() 回傳的是 SupabaseClient，不是 function，不能再呼叫一次
   const { supabaseAdmin } = await import("./supabaseAdmin");
   const adb = supabaseAdmin();
 
   const { data: profile, error: pErr } = await adb
     .from("users")
     .select("id, role, email")
-    .eq("id", actorId)
+    .eq("id", data.user.id)
     .maybeSingle();
 
-  if (pErr) {
-    return { ok: false as const, status: 500, message: `profile query failed: ${pErr.message}` };
-  }
+  if (pErr || !profile) throw new Error("PROFILE_NOT_FOUND");
 
-  if (!profile) {
-    return { ok: false as const, status: 403, message: "forbidden: user not found" };
-  }
+  return {
+    userId: data.user.id,
+    email: profile.email ?? data.user.email ?? null,
+    role: profile.role as AppRole,
+  };
+}
 
-  const role = profile.role as ActorRole;
+export function jsonError(message: string, status = 400) {
+  return new Response(JSON.stringify({ ok: false, error: message }), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
 
-  if (!allowed.includes(role)) {
-    return { ok: false as const, status: 403, message: `forbidden: role ${role}` };
-  }
-
-  return { ok: true as const, actorId, role, profile };
+export function jsonOk(payload: any, status = 200) {
+  return new Response(JSON.stringify({ ok: true, ...payload }), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }
